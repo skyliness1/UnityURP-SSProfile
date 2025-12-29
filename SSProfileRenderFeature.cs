@@ -278,9 +278,10 @@ namespace SoulRender
             // UE5 参数计算
             // ============================================================
             
-            // FOV 相关参数
-            float fov = cameraData.camera.fieldOfView * Mathf.Deg2Rad;
-            float distanceToProjectionWindow = 1.0f / Mathf. Tan(fov * 0.5f);
+            float tanHalfFov = Mathf.Tan(cameraData.camera.fieldOfView * Mathf.Deg2Rad * 0.5f);
+            float projectionDistance = 1.0f / tanHalfFov;
+            
+            float sssScaleX = _settings.sssScale * projectionDistance;
             
             // Kernel 大小
             int kernelSampleCount = _settings.quality switch
@@ -290,21 +291,8 @@ namespace SoulRender
                 _ => 6    // Low
             };
             
-            
-            float sssScale = _settings.sssScale;
-            float SSSScaleZ = distanceToProjectionWindow * sssScale;
-            float SSSScaleX = SSSScaleZ / SUBSURFACE_KERNEL_SIZE * 0.5f;
-            
-            // _SSSParams: 
-            // x = SSSScaleX (模糊半径缩放因子)
-            // y = DistanceToProjectionWindow (用于 SSSS_FOLLOW_SURFACE 深度感知)
-            // z = KernelSampleCount (采样数量)
-            // w = Quality (质量等级 0/1/2)
             cmd.SetGlobalVector(_SSSParamsID, new Vector4(
-                SSSScaleX,
-                distanceToProjectionWindow,
-                kernelSampleCount,
-                _settings.quality
+                sssScaleX, projectionDistance, 0, _settings.quality
             ));
             
             cmd.SetGlobalFloat(_DepthThresholdID, _settings.depthThreshold);
