@@ -151,7 +151,7 @@ Outputs Frag(Varyings input)
         
         if (GBuffer.shadingModelID == SHADINGMODELID_UNLIT)
         {
-            finalLighting.rgb = lerp( MixFogExp(finalLighting.rgb, fogCoord), finalLighting.rgb, GBuffer.ao);
+            finalLighting.rgb = lerp(MixFogExp(finalLighting.rgb, fogCoord), finalLighting.rgb, GBuffer.ao);
         }
         else
         {

@@ -2,6 +2,7 @@
 #define SSPROFILE_COMMON_INCLUDED
 
 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/SoulGBuffer.hlsl"
 #include "SSProfileDefines.hlsl"
 
 // ============================================================================
@@ -15,7 +16,7 @@ float4 LoadSSProfileTexture(uint profileId, uint pixelOffset)
 float4 SampleSSProfileTexture(uint profileId, uint pixelOffset)
 {
     float2 uv = float2(
-        (pixelOffset + 0.5) * _SSProfilesTextureSize. z,
+        (pixelOffset + 0.5) * _SSProfilesTextureSize.z,
         (profileId + 0.5) * _SSProfilesTextureSize.w
     );
     return SAMPLE_TEXTURE2D_LOD(_SSProfilesTexture, sampler_SSProfilesTexture, uv, 0);
@@ -95,7 +96,7 @@ void GetSubsurfaceProfileDualSpecular(uint profileId,
 }
 
 // ============================================================================
-// Kernel 采样
+// Kernel 采样 (修正版)
 // ============================================================================
 void GetKernelOffsetAndSize(uint quality, out uint offset, out uint size)
 {
@@ -116,8 +117,8 @@ void GetKernelOffsetAndSize(uint quality, out uint offset, out uint size)
     }
 }
 
-// 获取 Kernel 采样数据
-// 返回:  xyz = 权重, w = 采样偏移
+// 获取 Kernel 采样数据 (修正版)
+// 返回:  xyz = 权重 (已乘 TABLE_MAX_RGB), w = 采样偏移 (已乘 TABLE_MAX_A)
 float4 GetSubsurfaceProfileKernelSample(uint profileId, uint quality, uint sampleIndex)
 {
     uint offset, size;
@@ -128,8 +129,12 @@ float4 GetSubsurfaceProfileKernelSample(uint profileId, uint quality, uint sampl
     
     float4 data = LoadSSProfileTexture(profileId, offset + sampleIndex);
     
-    float3 weight = data.rgb;
-    float kernelOffset = data.a * TABLE_MAX_A * SUBSURFACE_RADIUS_SCALE;
+    // 修正:  
+    // - RGB 权重乘以 TABLE_MAX_RGB (实际上是 1.0，所以不变)
+    // - A 偏移乘以 TABLE_MAX_A (3.0)
+    // - 不再乘以 SUBSURFACE_RADIUS_SCALE (这在编码时已经处理)
+    float3 weight = data.rgb * TABLE_MAX_RGB;
+    float kernelOffset = data.a * TABLE_MAX_A;
     
     return float4(weight, kernelOffset);
 }
@@ -178,6 +183,150 @@ uint GetProfileIdFromNormalized(float normalizedId)
 bool IsValidProfile(uint profileId)
 {
     return profileId < 256;
+}
+
+// ============================================================================
+// 光照计算函数
+// ============================================================================
+bool IsCheckerboardEven(int2 pixelCoord)
+{
+    return ((pixelCoord.x + pixelCoord.y) & 1) == 0;
+}
+
+float3 CalculateDualSpecular(
+    BRDFData brdfData,
+    float3 normalWS,
+    float3 lightDir,
+    float3 viewDir,
+    float roughness0,
+    float roughness1,
+    float lobeMix,
+    float opacity)
+{
+    // 当 opacity 较低时，平滑过渡到普通 specular
+    // 参考 UE5: SubsurfaceProfileCommon. ush - GetSubsurfaceProfileDualSpecular
+    float opacityFade = saturate((opacity - 0.1) * 10.0);
+    
+    // Lobe 0
+    BRDFData brdfData0 = brdfData;
+    float r0 = lerp(brdfData.roughness, saturate(roughness0 * brdfData.roughness), opacityFade);
+    brdfData0.roughness = r0;
+    brdfData0.roughness2 = r0 * r0;
+    brdfData0.normalizationTerm = r0 * 4.0 + 2.0;
+    brdfData0.roughness2MinusOne = brdfData0.roughness2 - 1.0;
+    
+    // Lobe 1
+    BRDFData brdfData1 = brdfData;
+    float r1 = lerp(brdfData.roughness, saturate(roughness1 * brdfData.roughness), opacityFade);
+    brdfData1.roughness = r1;
+    brdfData1.roughness2 = r1 * r1;
+    brdfData1.normalizationTerm = r1 * 4.0 + 2.0;
+    brdfData1.roughness2MinusOne = brdfData1.roughness2 - 1.0;
+    
+    float3 spec0 = DirectBRDFSpecular(brdfData0, normalWS, lightDir, viewDir);
+    float3 spec1 = DirectBRDFSpecular(brdfData1, normalWS, lightDir, viewDir);
+    
+    return lerp(spec0, spec1, lobeMix);
+}
+
+// 透射参数结构
+struct TransmissionParams
+{
+    float extinctionScale;
+    float normalScale;
+    float scatteringDistribution;
+    float oneOverIOR;
+};
+
+TransmissionParams GetTransmissionParams(uint profileId)
+{
+    TransmissionParams params;
+    GetSubsurfaceProfileTransmissionParams(profileId,
+        params.extinctionScale,
+        params.normalScale,
+        params.scatteringDistribution,
+        params.oneOverIOR);
+    return params;
+}
+
+// 计算透射光照
+// 参考 UE5: SeparableSSS.ush - SSSSTransmittance
+// 以及 TransmissionCommon. ush
+float3 CalculateTransmission(
+    uint profileId,
+    float3 worldPosition,
+    float3 worldNormal,
+    float3 lightDir,
+    float shadowDepth,        // 从阴影贴图采样的深度
+    float receiverDepth,      // 当前像素的深度
+    float3 lightColor,
+    float lightAttenuation)
+{
+    TransmissionParams params = GetTransmissionParams(profileId);
+    
+    // 计算厚度 (光线穿过物体的距离)
+    // shadowDepth 是光源视角下遮挡物的深度
+    // receiverDepth 是光源视角下当前像素的深度
+    float thickness = max(receiverDepth - shadowDepth, 0.0) * params.extinctionScale;
+    
+    // 从 Transmission Profile 采样
+    float4 transmissionProfile = SampleTransmissionProfile(profileId, thickness);
+    float3 transmissionColor = transmissionProfile.rgb;
+    float shadowFalloff = transmissionProfile.a;
+    
+    // 计算透射方向
+    // 使用法线偏移来模拟光线在物体内部的散射
+    float3 transmissionNormal = normalize(worldNormal * params.normalScale - lightDir);
+    
+    // 背面光照因子
+    float NdotL = dot(worldNormal, lightDir);
+    float backNdotL = saturate(-NdotL);
+    
+    // 散射分布 (Henyey-Greenstein 相函数的简化版本)
+    float VdotL = dot(normalize(-worldPosition), lightDir); // 假设相机在原点
+    float scatter = lerp(backNdotL, saturate(VdotL), params.scatteringDistribution * 0.5 + 0.5);
+    
+    // 最终透射
+    float3 transmission = transmissionColor * shadowFalloff * scatter * lightColor * lightAttenuation;
+    
+    return transmission;
+}
+
+// 简化版透射计算 (不需要阴影深度，基于法线和光照方向)
+float3 CalculateTransmissionSimple(
+    uint profileId,
+    float3 worldNormal,
+    float3 lightDir,
+    float3 viewDir,
+    float3 lightColor,
+    float lightAttenuation,
+    float thickness)  // 可以从材质或 GBuffer 传入
+{
+    TransmissionParams params = GetTransmissionParams(profileId);
+    
+    // 缩放厚度
+    float scaledThickness = thickness * params. extinctionScale;
+    
+    // 从 Transmission Profile 采样
+    float4 transmissionProfile = SampleTransmissionProfile(profileId, scaledThickness);
+    float3 transmissionColor = transmissionProfile. rgb;
+    float shadowFalloff = transmissionProfile.a;
+    
+    // 背面光照
+    float NdotL = dot(worldNormal, lightDir);
+    float backLighting = saturate(-NdotL);
+    
+    // View-dependent 散射
+    float VdotL = saturate(dot(-viewDir, lightDir));
+    float scatter = lerp(backLighting, pow(VdotL, 4.0), params.scatteringDistribution * 0.5 + 0.5);
+    
+    // 法线影响
+    scatter *= (1.0 + params.normalScale * (1.0 - backLighting));
+    
+    // 最终透射
+    float3 transmission = transmissionColor * shadowFalloff * scatter * lightColor * lightAttenuation;
+    
+    return transmission;
 }
 
 #endif // SSPROFILE_COMMON_INCLUDED

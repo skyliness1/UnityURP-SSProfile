@@ -1,6 +1,6 @@
 using UnityEngine;
 using UnityEngine.Rendering;
-using UnityEngine.Rendering.Universal;
+using UnityEngine.Rendering. Universal;
 
 namespace SoulRender
 {
@@ -13,28 +13,41 @@ namespace SoulRender
             public Texture2D ssProfileTexture;
             
             [Header("Quality")]
+            [Tooltip("0=Low(6 samples), 1=Medium(9 samples), 2=High(13 samples)")]
             [Range(0, 2)]
             public int quality = 1;
             
             [Header("Scale")]
-            [Range(0.0f, 3.0f)]
+            [Tooltip("控制散射半径，对应 UE5 的 r. SSS.Scale")]
+            [Range(0.1f, 5.0f)]
             public float sssScale = 1.0f;
             
-            [Header("Bilateral Filter")]
-            [Range(0.1f, 10.0f)]
-            public float depthThreshold = 1.0f;
+            [Header("Depth Threshold")]
+            [Tooltip("SSSS_FOLLOW_SURFACE 的深度阈值，值越大边缘越模糊")]
+            [Range(0.1f, 50.0f)]
+            public float depthThreshold = 30.0f;
             
             [Header("Debug")]
             public DebugMode debugMode = DebugMode.Off;
+            public DebugPass debugPass = DebugPass.Final;
         }
         
         public enum DebugMode
         {
             Off = 0,
-            Checkerboard = 1,
-            DiffuseOnly = 2,
-            SpecularOnly = 3,
-            SSSMask = 4
+            ShowUV = 1,
+            ShowGBufferD = 2,
+            ShowScreenColor = 3,
+            ShowShadingModelID = 4,
+            ShowSSSMask = 5,
+            ShowDepth = 6
+        }
+        
+        public enum DebugPass
+        {
+            Final = 0,
+            SetupOnly = 1,
+            BlurOnly = 2
         }
 
         public Settings settings = new Settings();
@@ -42,15 +55,22 @@ namespace SoulRender
 
         public override void Create()
         {
-            _sssPass = new SSSProcessPass(settings);
-            // 必须在 Deferred Lighting 之后执行
-            _sssPass.renderPassEvent = RenderPassEvent.AfterRenderingDeferredLights;
+            _sssPass = new SSSProcessPass();
+            _sssPass.renderPassEvent = RenderPassEvent.BeforeRenderingPostProcessing;
         }
 
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
         {
-            if (settings.ssProfileTexture == null) return;
-            if (renderingData.cameraData.cameraType == CameraType.Preview || renderingData.cameraData.cameraType == CameraType.Reflection) return;
+            if (settings.ssProfileTexture == null)
+            {
+                return;
+            }
+
+            if (renderingData.cameraData.cameraType == CameraType.Preview ||
+                renderingData.cameraData.cameraType == CameraType.Reflection)
+            {
+                return;
+            }
 
             _sssPass.Setup(settings);
             renderer.EnqueuePass(_sssPass);
@@ -66,30 +86,77 @@ namespace SoulRender
     {
         private const string PROFILER_TAG = "SSS Profile";
         private SSProfileRenderFeature.Settings _settings;
+        
+        private Material _setupMaterial;
         private Material _blurMaterial;
         private Material _recombineMaterial;
         
+        private RTHandle _setupRT;
         private RTHandle _blurTempRT;
         private RTHandle _blurredRT;
-        private RTHandle _finalRT;
-        
-        // 定义显式的全局纹理 ID，避免使用 _MainTex 造成的混淆
-        private static readonly int _Soul_ScreenColor_ID = Shader.PropertyToID("_Soul_ScreenColor");
-        private static readonly int _SSSBlurredRT_ID = Shader.PropertyToID("_SSSBlurredRT");
+        private RTHandle _screenColorCopyRT;
 
-        public SSSProcessPass(SSProfileRenderFeature.Settings settings)
+        // Shader Property IDs
+        private static readonly int _BlurDirectionID = Shader.PropertyToID("_BlurDirection");
+        private static readonly int _DebugModeID = Shader.PropertyToID("_DebugMode");
+        private static readonly int _SSS_ScreenColorID = Shader.PropertyToID("_SSS_ScreenColor");
+        private static readonly int _SSS_BlurredResultID = Shader.PropertyToID("_SSS_BlurredResult");
+        private static readonly int _SSSParamsID = Shader.PropertyToID("_SSSParams");
+        private static readonly int _DepthThresholdID = Shader.PropertyToID("_DepthThreshold");
+        private static readonly int _SSProfilesTextureID = Shader.PropertyToID("_SSProfilesTexture");
+        private static readonly int _SSProfilesTextureSizeID = Shader. PropertyToID("_SSProfilesTextureSize");
+
+        // UE5 Constants
+        private const float SUBSURFACE_RADIUS_SCALE = 1024.0f;
+        private const float SUBSURFACE_KERNEL_SIZE = 3.0f;
+
+        public SSSProcessPass()
         {
-            _settings = settings;
-            var blurShader = Shader.Find("Soul/Scene/SSProfileBlur");
-            if (blurShader != null) _blurMaterial = CoreUtils.CreateEngineMaterial(blurShader);
             
-            var recombineShader = Shader.Find("Soul/Scene/SSProfileRecombine");
-            if (recombineShader != null) _recombineMaterial = CoreUtils.CreateEngineMaterial(recombineShader);
         }
 
         public void Setup(SSProfileRenderFeature.Settings settings)
         {
             _settings = settings;
+            
+            if (_setupMaterial == null)
+            {
+                var shader = Shader.Find("Soul/Scene/SSProfileSetup");
+                if (shader != null)
+                {
+                    _setupMaterial = CoreUtils.CreateEngineMaterial(shader);
+                }
+                else
+                {
+                    Debug.LogError("[SSProfile] Cannot find shader: Soul/Scene/SSProfileSetup");
+                }
+            }
+            
+            if (_blurMaterial == null)
+            {
+                var shader = Shader.Find("Soul/Scene/SSProfileBlur");
+                if (shader != null)
+                {
+                    _blurMaterial = CoreUtils.CreateEngineMaterial(shader);
+                }
+                else
+                {
+                    Debug.LogError("[SSProfile] Cannot find shader: Soul/Scene/SSProfileBlur");
+                }
+            }
+            
+            if (_recombineMaterial == null)
+            {
+                var shader = Shader.Find("Soul/Scene/SSProfileRecombine");
+                if (shader != null)
+                {
+                    _recombineMaterial = CoreUtils.CreateEngineMaterial(shader);
+                }
+                else
+                {
+                    Debug.LogError("[SSProfile] Cannot find shader: Soul/Scene/SSProfileRecombine");
+                }
+            }
         }
 
         public override void OnCameraSetup(CommandBuffer cmd, ref RenderingData renderingData)
@@ -97,91 +164,160 @@ namespace SoulRender
             var desc = renderingData.cameraData.cameraTargetDescriptor;
             desc.depthBufferBits = 0;
             desc.msaaSamples = 1;
-            desc.colorFormat = RenderTextureFormat.ARGBHalf;
+            desc.graphicsFormat = UnityEngine.Experimental.Rendering.GraphicsFormat. R16G16B16A16_SFloat;
             
-            RenderingUtils.ReAllocateIfNeeded(ref _blurTempRT, desc, FilterMode.Bilinear, TextureWrapMode.Clamp, name: "_SSSBlurTemp");
-            RenderingUtils.ReAllocateIfNeeded(ref _blurredRT, desc, FilterMode.Bilinear, TextureWrapMode.Clamp, name: "_SSSBlurredRT");
-            RenderingUtils.ReAllocateIfNeeded(ref _finalRT, desc, FilterMode.Bilinear, TextureWrapMode.Clamp, name: "_SSSFinalRT");
+            RenderingUtils.ReAllocateIfNeeded(ref _setupRT, desc, FilterMode.Bilinear, 
+                TextureWrapMode.Clamp, name: "_SSS_SetupRT");
+            RenderingUtils.ReAllocateIfNeeded(ref _blurTempRT, desc, FilterMode.Bilinear, 
+                TextureWrapMode.Clamp, name: "_SSS_BlurTempRT");
+            RenderingUtils.ReAllocateIfNeeded(ref _blurredRT, desc, FilterMode.Bilinear, 
+                TextureWrapMode.Clamp, name: "_SSS_BlurredRT");
+            RenderingUtils.ReAllocateIfNeeded(ref _screenColorCopyRT, desc, FilterMode.Bilinear, 
+                TextureWrapMode.Clamp, name: "_SSS_ScreenColorCopy");
         }
 
         public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)
         {
-            if (_blurMaterial == null || _recombineMaterial == null || _settings.ssProfileTexture == null) return;
+            if (_setupMaterial == null || _blurMaterial == null || _recombineMaterial == null)
+            {
+                return;
+            }
+
+            if (_settings.ssProfileTexture == null)
+            {
+                return;
+            }
 
             var cmd = CommandBufferPool.Get(PROFILER_TAG);
-            var cameraData = renderingData.cameraData;
             
-            // 获取当前屏幕内容
-            RTHandle sourceHandle = renderingData.cameraData.renderer.cameraColorTargetHandle;
-
-            SetupGlobalParameters(cmd, cameraData, cameraData.cameraTargetDescriptor);
+            try
+            {
+                ExecutePass(cmd, ref renderingData);
+            }
+            finally
+            {
+                context.ExecuteCommandBuffer(cmd);
+                CommandBufferPool.Release(cmd);
+            }
+        }
+        
+        private void ExecutePass(CommandBuffer cmd, ref RenderingData renderingData)
+        {
+            var cameraData = renderingData. cameraData;
+            var source = cameraData.renderer.cameraColorTargetHandle;
+            
+            // 设置全局参数
+            SetupGlobalParameters(cmd, cameraData);
+            
+            float debugMode = (float)_settings.debugMode;
             
             // ================================================================
-            // 关键修复：显式设置全局纹理，Shader 中使用 _Soul_ScreenColor 读取
+            // 复制原始场景颜色，用于 Recombine 阶段
             // ================================================================
-            cmd.SetGlobalTexture(_Soul_ScreenColor_ID, sourceHandle);
-
-            // Pass 1: 水平模糊
-            // 输入: _Soul_ScreenColor (Global)
-            // 输出: _blurTempRT
-            _blurMaterial.SetVector("_BlurDirection", new Vector4(1, 0, 0, 0));
-            cmd.Blit(sourceHandle, _blurTempRT, _blurMaterial, 0);
+            Blitter.BlitCameraTexture(cmd, source, _screenColorCopyRT);
             
-            // Pass 2: 垂直模糊
-            // 输入: _blurTempRT (作为 _Soul_ScreenColor 传入)
-            // 这里的技巧是：为了复用Shader逻辑，我们将 _Soul_ScreenColor 更新为 _blurTempRT
-            cmd.SetGlobalTexture(_Soul_ScreenColor_ID, _blurTempRT);
-            _blurMaterial.SetVector("_BlurDirection", new Vector4(0, 1, 0, 0));
-            cmd.Blit(_blurTempRT, _blurredRT, _blurMaterial, 0);
+            // ================================================================
+            // Pass 0: Setup - 提取 Diffuse 和 Depth
+            // ================================================================
+            _setupMaterial.SetFloat(_DebugModeID, debugMode);
+            Blitter.BlitCameraTexture(cmd, source, _setupRT, _setupMaterial, 0);
             
-            // Pass 3: Recombine
-            // 输入1: 原始屏幕 (sourceHandle) -> 重新设置为 _Soul_ScreenColor
-            // 输入2: 模糊结果 (_blurredRT) -> 通过 _SSSBlurredRT 传入
-            cmd.SetGlobalTexture(_Soul_ScreenColor_ID, sourceHandle);
-            _recombineMaterial.SetTexture(_SSSBlurredRT_ID, _blurredRT);
-            _recombineMaterial.SetFloat("_DebugMode", (float)_settings.debugMode);
+            if (_settings.debugPass == SSProfileRenderFeature.DebugPass.SetupOnly)
+            {
+                Blitter.BlitCameraTexture(cmd, _setupRT, source);
+                return;
+            }
             
-            cmd.Blit(sourceHandle, _finalRT, _recombineMaterial, 0);
+            // ================================================================
+            // Pass 1: Horizontal Blur
+            // UE5: ViewportDirectionUV = float2(1, 0) * SUBSURFACE_RADIUS_SCALE
+            // ================================================================
+            _blurMaterial.SetFloat(_DebugModeID, debugMode);
+            _blurMaterial.SetVector(_BlurDirectionID, new Vector4(SUBSURFACE_RADIUS_SCALE, 0, 0, 0));
+            Blitter.BlitCameraTexture(cmd, _setupRT, _blurTempRT, _blurMaterial, 0);
             
-            // Write Back
-            cmd.Blit(_finalRT, sourceHandle);
-
-            context.ExecuteCommandBuffer(cmd);
-            CommandBufferPool.Release(cmd);
+            // ================================================================
+            // Pass 2: Vertical Blur
+            // UE5: ViewportDirectionUV = float2(0, 1) * SUBSURFACE_RADIUS_SCALE * aspectRatio
+            // ================================================================
+            float aspectRatio = (float)cameraData.camera.pixelWidth / cameraData.camera.pixelHeight;
+            _blurMaterial.SetVector(_BlurDirectionID, new Vector4(0, SUBSURFACE_RADIUS_SCALE * aspectRatio, 0, 0));
+            Blitter.BlitCameraTexture(cmd, _blurTempRT, _blurredRT, _blurMaterial, 0);
+            
+            if (_settings.debugPass == SSProfileRenderFeature.DebugPass.BlurOnly)
+            {
+                Blitter.BlitCameraTexture(cmd, _blurredRT, source);
+                return;
+            }
+            
+            // ================================================================
+            // Pass 3: Recombine - 合并模糊的 Diffuse 和原始 Specular
+            // ================================================================
+            _recombineMaterial.SetFloat(_DebugModeID, debugMode);
+            
+            // 设置纹理
+            cmd.SetGlobalTexture(_SSS_ScreenColorID, _screenColorCopyRT);
+            cmd.SetGlobalTexture(_SSS_BlurredResultID, _blurredRT);
+            
+            // 直接输出到 source
+            Blitter.BlitCameraTexture(cmd, _screenColorCopyRT, source, _recombineMaterial, 0);
         }
 
-        private void SetupGlobalParameters(CommandBuffer cmd, CameraData cameraData, RenderTextureDescriptor desc)
+        private void SetupGlobalParameters(CommandBuffer cmd, CameraData cameraData)
         {
-            cmd.SetGlobalTexture("_SSProfilesTexture", _settings.ssProfileTexture);
-            // 传递纹理尺寸倒数，供采样使用
-            cmd.SetGlobalVector("_SSProfilesTextureSize", new Vector4(
-                _settings.ssProfileTexture.width, _settings.ssProfileTexture.height,
-                1.0f / _settings.ssProfileTexture.width, 1.0f / _settings.ssProfileTexture.height
+            // 设置 Profile 纹理
+            cmd. SetGlobalTexture(_SSProfilesTextureID, _settings. ssProfileTexture);
+            cmd.SetGlobalVector(_SSProfilesTextureSizeID, new Vector4(
+                _settings.ssProfileTexture.width, 
+                _settings.ssProfileTexture. height,
+                1.0f / _settings.ssProfileTexture.width, 
+                1.0f / _settings.ssProfileTexture. height
             ));
             
+            // ============================================================
+            // UE5 参数计算
+            // ============================================================
+            
+            // FOV 相关参数
             float fov = cameraData.camera.fieldOfView * Mathf.Deg2Rad;
-            float distanceToProjectionWindow = 1.0f / Mathf.Tan(fov * 0.5f);
+            float distanceToProjectionWindow = 1.0f / Mathf. Tan(fov * 0.5f);
             
-            int kernelSize = 9;
-            if (_settings.quality == 2) kernelSize = 13;
-            else if (_settings.quality == 1) kernelSize = 9;
-            else kernelSize = 6;
+            // Kernel 大小
+            int kernelSampleCount = _settings.quality switch
+            {
+                2 => 13,  // High
+                1 => 9,   // Medium
+                _ => 6    // Low
+            };
             
-            cmd.SetGlobalVector("_SSSParams", new Vector4(
-                _settings.sssScale * distanceToProjectionWindow / kernelSize * 0.5f,
+            
+            float sssScale = _settings.sssScale;
+            float SSSScaleZ = distanceToProjectionWindow * sssScale;
+            float SSSScaleX = SSSScaleZ / SUBSURFACE_KERNEL_SIZE * 0.5f;
+            
+            // _SSSParams: 
+            // x = SSSScaleX (模糊半径缩放因子)
+            // y = DistanceToProjectionWindow (用于 SSSS_FOLLOW_SURFACE 深度感知)
+            // z = KernelSampleCount (采样数量)
+            // w = Quality (质量等级 0/1/2)
+            cmd.SetGlobalVector(_SSSParamsID, new Vector4(
+                SSSScaleX,
                 distanceToProjectionWindow,
-                kernelSize,
+                kernelSampleCount,
                 _settings.quality
             ));
             
-            cmd.SetGlobalFloat("_DepthThreshold", _settings.depthThreshold);
+            cmd.SetGlobalFloat(_DepthThresholdID, _settings.depthThreshold);
         }
 
         public void Dispose()
         {
+            _setupRT?.Release();
             _blurTempRT?.Release();
             _blurredRT?.Release();
-            _finalRT?.Release();
+            _screenColorCopyRT?.Release();
+            
+            CoreUtils.Destroy(_setupMaterial);
             CoreUtils.Destroy(_blurMaterial);
             CoreUtils.Destroy(_recombineMaterial);
         }
