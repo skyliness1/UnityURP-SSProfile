@@ -1,0 +1,15 @@
+#pragma kernel CSPrepareIndirectArgs
+
+// 输入：Setup Pass 的 TileCountBuffer
+RWStructuredBuffer<uint> _TileCountBuffer;
+
+// 输出：IndirectArgs Buffer
+RWStructuredBuffer<uint> _IndirectArgsBuffer;
+
+[numthreads(1, 1, 1)]
+void CSPrepareIndirectArgs(uint3 id : SV_DispatchThreadID)
+{
+    _IndirectArgsBuffer[0] = _TileCountBuffer[0];
+    _IndirectArgsBuffer[1] = 1;
+    _IndirectArgsBuffer[2] = 1;
+}

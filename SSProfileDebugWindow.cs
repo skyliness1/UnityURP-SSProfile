@@ -91,7 +91,7 @@ namespace SoulRender
             EditorGUILayout.LabelField("【Tint & Scale】", EditorStyles.boldLabel);
             Color tintScale = _texture.GetPixel(SSSS_TINT_SCALE_OFFSET, profileId);
             EditorGUILayout.ColorField("Raw Tint (RGB)", new Color(tintScale.r, tintScale.g, tintScale.b, 1));
-            EditorGUILayout. FloatField("Decoded WorldUnitScale", tintScale.a * DEC_WORLDUNITSCALE);
+            EditorGUILayout.FloatField("Decoded WorldUnitScale", tintScale.a * DEC_WORLDUNITSCALE);
             EditorGUILayout.Space();
 
             // 2. Surface Albedo
@@ -108,7 +108,7 @@ namespace SoulRender
             EditorGUILayout.LabelField($"  Encoded: R={dmfpEncoded.r:F6}, G={dmfpEncoded.g:F6}, B={dmfpEncoded.b:F6}, A={dmfpEncoded.a:F6}");
             
             Color dmfpDecoded = dmfpEncoded * DEC_DMFP;
-            EditorGUILayout. ColorField("Decoded DMFP (mm)", dmfpDecoded);
+            EditorGUILayout.ColorField("Decoded DMFP (mm)", dmfpDecoded);
             EditorGUILayout.LabelField($"  Decoded (mm): R={dmfpDecoded.r:F2}, G={dmfpDecoded.g:F2}, B={dmfpDecoded.b:F2}, A={dmfpDecoded.a:F2}");
             
             // 计算并显示 MFP (逆向转换)
@@ -119,7 +119,7 @@ namespace SoulRender
             float magicNumber = 0.6f;
             Vector3 searchLight = new Vector3(
                 GetSearchLightFactor(albedo.r),
-                GetSearchLightFactor(albedo. g),
+                GetSearchLightFactor(albedo.g),
                 GetSearchLightFactor(albedo.b)
             );
             Vector3 perp = new Vector3(
@@ -132,26 +132,26 @@ namespace SoulRender
             EditorGUILayout.LabelField($"  Perpendicular Factor: ({perp.x:F2}, {perp.y:F2}, {perp.z:F2})");
             
             Vector3 mfpCalculated = new Vector3(
-                dmfpDecoded.r * magicNumber * (perp.x / searchLight. x) / 10f,
-                dmfpDecoded.g * magicNumber * (perp.y / searchLight. y) / 10f,
+                dmfpDecoded.r * magicNumber * (perp.x / searchLight.x) / 10f,
+                dmfpDecoded.g * magicNumber * (perp.y / searchLight.y) / 10f,
                 dmfpDecoded.b * magicNumber * (perp.z / searchLight.z) / 10f
             );
-            EditorGUILayout.LabelField($"  Calculated MFP (cm): ({mfpCalculated.x:F4}, {mfpCalculated. y:F4}, {mfpCalculated.z:F4})");
+            EditorGUILayout.LabelField($" Calculated MFP (cm): ({mfpCalculated.x:F4}, {mfpCalculated.y:F4}, {mfpCalculated.z:F4})");
             EditorGUILayout.Space();
 
             // 4. Transmission Params
-            EditorGUILayout. LabelField("【Transmission Parameters】", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("【Transmission Parameters】", EditorStyles.boldLabel);
             Color transParams = _texture.GetPixel(SSSS_TRANSMISSION_OFFSET, profileId);
-            EditorGUILayout.FloatField("Decoded ExtinctionScale", transParams. r * DEC_EXTINCTION);
+            EditorGUILayout.FloatField("Decoded ExtinctionScale", transParams.r * DEC_EXTINCTION);
             EditorGUILayout.FloatField("NormalScale", transParams.g);
-            EditorGUILayout. FloatField("Decoded ScatteringDist", transParams. b * 2.0f - 1.0f);
+            EditorGUILayout.FloatField("Decoded ScatteringDist", transParams.b * 2.0f - 1.0f);
             EditorGUILayout.FloatField("IOR", 1.0f / transParams.a);
             EditorGUILayout.Space();
 
             // 5. Boundary Color Bleed
             EditorGUILayout.LabelField("【Boundary Color Bleed】", EditorStyles.boldLabel);
             Color boundary = _texture.GetPixel(SSSS_BOUNDARY_COLOR_BLEED_OFFSET, profileId);
-            EditorGUILayout.ColorField("Boundary Bleed (RGB)", new Color(boundary.r, boundary. g, boundary.b, 1));
+            EditorGUILayout.ColorField("Boundary Bleed (RGB)", new Color(boundary.r, boundary.g, boundary.b, 1));
             EditorGUILayout.FloatField("SSS Type (A)", boundary.a);
             EditorGUILayout.Space();
 
@@ -160,7 +160,7 @@ namespace SoulRender
             Color dualSpec = _texture.GetPixel(SSSS_DUAL_SPECULAR_OFFSET, profileId);
             EditorGUILayout.FloatField("Decoded Roughness0", dualSpec.r * SSSS_MAX_DUAL_SPECULAR_ROUGHNESS);
             EditorGUILayout.FloatField("Decoded Roughness1", dualSpec.g * SSSS_MAX_DUAL_SPECULAR_ROUGHNESS);
-            EditorGUILayout.FloatField("LobeMix", dualSpec. b);
+            EditorGUILayout.FloatField("LobeMix", dualSpec.b);
             EditorGUILayout.Space();
 
             // 7. Kernel 0
@@ -170,8 +170,11 @@ namespace SoulRender
                 Color k = _texture.GetPixel(SSSS_KERNEL0_OFFSET + i, profileId);
                 EditorGUILayout.LabelField($"  Sample {i}: RGB=({k.r:F4}, {k.g:F4}, {k.b:F4}), Offset={k.a:F6}");
             }
+
             if (SSSS_KERNEL0_SIZE > 5)
+            {
                 EditorGUILayout.LabelField($"  ...  and {SSSS_KERNEL0_SIZE - 5} more samples");
+            }
             EditorGUILayout.Space();
 
             // 8. Transmission Profile
@@ -181,8 +184,11 @@ namespace SoulRender
                 Color t = _texture.GetPixel(BSSS_TRANSMISSION_PROFILE_OFFSET + i, profileId);
                 EditorGUILayout.LabelField($"  Sample {i}: RGB=({t.r:F4}, {t.g:F4}, {t.b:F4}), Shadow={t.a:F4}");
             }
+
             if (BSSS_TRANSMISSION_PROFILE_SIZE > 8)
+            {
                 EditorGUILayout. LabelField($"  ... and {BSSS_TRANSMISSION_PROFILE_SIZE - 8} more samples");
+            }
         }
 
         private float GetSearchLightFactor(float albedo)

@@ -1,0 +1,207 @@
+#pragma kernel CSSetup
+
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareOpaqueDepth.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/SoulGBuffer.hlsl"
+#include "Packages/com.unity.render-pipelines.universal@14.0.11/ArtShaders/Scene/SSProfile/Shaders/Include/SSProfileCommon.hlsl"
+
+TEXTURE2D_X(_GBufferTextureA);
+TEXTURE2D_X(_GBufferTextureB);
+TEXTURE2D_X(_GBufferTextureC);
+TEXTURE2D_X(_GBufferTextureD);
+
+// ============================================================================
+// 输出纹理（双 RT）
+// ============================================================================
+
+RWTexture2D<float4> _SetupDiffuseOutput;   // RGB=Diffuse, A=Depth
+RWTexture2D<float4> _SetupSpecularOutput;  // RGB=Specular, A=ProfileID
+
+// ============================================================================
+// Tile 分类输出（AppendBuffer）
+// ============================================================================
+
+struct TileData
+{
+    uint2 tileCoord;  // Tile 左上角坐标
+};
+
+AppendStructuredBuffer<TileData> _TileBuffer;
+RWStructuredBuffer<uint> _TileCountBuffer;  // [0] = Tile 计数
+
+// ============================================================================
+// 参数
+// ============================================================================
+
+float4 _SetupTexture_TexelSize;  // (width, height, 1/width, 1/height)
+float4x4 _InvViewProjectionMatrix;
+
+#define TILE_SIZE 8
+
+// ============================================================================
+// Shared Memory（加速 Tile 内检测）
+// ============================================================================
+
+groupshared uint gs_HasSSS;  // 当前 Tile 是否有 SSS 像素
+
+// ============================================================================
+// 能量估算函数
+// ============================================================================
+
+float3 EnvBRDFApprox(float3 specularColor, float roughness, float NoV)
+{
+    const float4 c0 = float4(-1, -0.0275, -0.572, 0.022);
+    const float4 c1 = float4(1, 0.0425, 1.04, -0.04);
+    float4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * NoV)) * r.x + r.y;
+    float2 AB = float2(-1.04, 1.04) * a004 + r.zw;
+    return specularColor * AB. x + AB.y;
+}
+
+// ============================================================================
+// Diffuse/Specular 分离
+// ============================================================================
+
+void SeparateDiffuseAndSpecular(
+    float3 sceneColor,
+    GBufferData gbuffer,
+    float3 viewDirWS,
+    out float3 outDiffuse,
+    out float3 outSpecular)
+{
+    float3 diffuseColor = gbuffer.baseColor * (1.0 - gbuffer.metallic);
+    float3 specularColor = lerp(0.04, gbuffer.baseColor, gbuffer.metallic);
+    float roughness = 1.0 - gbuffer.smoothness;
+
+    float NoV = saturate(dot(gbuffer.normalWS, viewDirWS));
+    float3 specularEnergy = EnvBRDFApprox(specularColor, roughness, NoV);
+
+    if (gbuffer.metallic < 0.01)
+    {
+        outSpecular = sceneColor * specularEnergy;
+        outDiffuse = sceneColor - outSpecular;
+        outDiffuse = max(outDiffuse, 0.0);
+        outSpecular = max(outSpecular, 0.0);
+    }
+    else
+    {
+        outDiffuse = 0.0;
+        outSpecular = sceneColor;
+    }
+}
+
+// ============================================================================
+// Compute Shader 主函数
+// ============================================================================
+
+[numthreads(TILE_SIZE, TILE_SIZE, 1)]
+void CSSetup(
+    uint3 dispatchThreadId : SV_DispatchThreadID,
+    uint3 groupThreadId : SV_GroupThreadID,
+    uint3 groupId : SV_GroupID)
+{
+    // 初始化 Shared Memory（每个 Tile 一次）
+    if (all(groupThreadId.xy == 0))
+    {
+        gs_HasSSS = 0;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+    
+    uint2 pixelCoord = dispatchThreadId.xy;
+    uint width = (uint)_SetupTexture_TexelSize.x;
+    uint height = (uint)_SetupTexture_TexelSize.y;
+
+    uint2 tileOrigin = groupId.xy * TILE_SIZE;
+    bool tileValid = (tileOrigin.x < width) && (tileOrigin.y < height);
+
+    bool isInsideScreen = (pixelCoord.x < width && pixelCoord.y < height);
+
+    // ========================================================================
+    // 默认值（边界外的线程使用）
+    // ========================================================================
+
+    float3 sceneColor = 0;
+    GBufferData gbuffer = (GBufferData)0;
+    float depth = 0;
+    bool isSSS = false;
+
+    if (isInsideScreen)
+    {
+        // ====================================================================
+        // 1. 读取数据
+        // ====================================================================
+
+        float2 uv = (pixelCoord + 0.5) * _SetupTexture_TexelSize.zw;
+
+        sceneColor = _TempColorAttachment[pixelCoord].rgb;
+        
+        GBufferTypeA gbufferA = _GBufferTextureA[pixelCoord];
+        GBufferTypeB gbufferB = _GBufferTextureB[pixelCoord];
+        GBufferTypeC gbufferC = _GBufferTextureC[pixelCoord];
+        GBufferTypeD gbufferD = _GBufferTextureD[pixelCoord];
+
+        DECODE_FROM_GBUFFER(gbufferA, gbufferB, gbufferC, gbufferD, 0, gbuffer);
+
+        depth = _TempDepthAttachment[pixelCoord].r;
+
+        isSSS = (gbuffer.shadingModelID == SHADINGMODELID_SUBSURFACE_PROFILE);
+
+        if (isSSS)
+        {
+            InterlockedOr(gs_HasSSS, 1);
+        }
+    }
+
+    // ========================================================================
+    // 3. 分离 Diffuse 和 Specular
+    // ========================================================================
+
+    float3 diffuse = 0;
+    float3 specular = 0;
+    uint profileID = 0;
+
+    if (isInsideScreen && isSSS)
+    {
+        float2 uv = (pixelCoord + 0.5) * _SetupTexture_TexelSize.zw;
+        float3 positionWS = ComputeWorldSpacePosition(uv, depth, _InvViewProjectionMatrix);
+        float3 viewDirWS = normalize(GetCameraPositionWS() - positionWS);
+
+        SeparateDiffuseAndSpecular(sceneColor, gbuffer, viewDirWS, diffuse, specular);
+
+        profileID = ExtractProfileID(gbuffer.customDataSingle);
+    }
+
+    // ========================================================================
+    // 4. 写入输出纹理
+    // ========================================================================
+
+    if (isInsideScreen)
+    {
+        if (isSSS)
+        {
+            _SetupDiffuseOutput[pixelCoord] = float4(diffuse, depth);
+            _SetupSpecularOutput[pixelCoord] = float4(specular, EncodeProfileID(profileID));
+        }
+        else
+        {
+            _SetupDiffuseOutput[pixelCoord] = float4(0, 0, 0, 0);
+            _SetupSpecularOutput[pixelCoord] = float4(0, 0, 0, 0);
+        }
+    }
+
+    // ========================================================================
+    // 5. Tile 分类（每个 Tile 只记录一次）
+    // ========================================================================
+
+    GroupMemoryBarrierWithGroupSync();
+
+    if (all(groupThreadId.xy == 0) && gs_HasSSS > 0 && tileValid)
+    {
+        TileData tile;
+        tile.tileCoord = groupId.xy * TILE_SIZE;
+        
+        _TileBuffer.Append(tile);
+        InterlockedAdd(_TileCountBuffer[0], 1);
+    }
+}

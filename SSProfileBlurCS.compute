@@ -1,0 +1,236 @@
+#pragma kernel CSBlurHorizontal
+#pragma kernel CSBlurVertical
+#pragma kernel CSBlurHorizontalIndirect  
+#pragma kernel CSBlurVerticalIndirect  
+
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+#include "Packages/com.unity.render-pipelines.universal@14.0.11/ArtShaders/Scene/SSProfile/Shaders/Include/SSProfileCommon.hlsl"
+#include "Packages/com.unity.render-pipelines.universal@14.0.11/ArtShaders/Scene/SSProfile/Shaders/Include/SSProfileSampling.hlsl"
+
+// ============================================================================
+// 输入纹理
+// ============================================================================
+
+TEXTURE2D_X(_SSProfileSetupDiffuse);
+TEXTURE2D_X(_SSProfileSetupSpecular);
+TEXTURE2D_X(_BlurInputTexture);
+
+// ============================================================================
+// 输出纹理
+// ============================================================================
+
+RWTexture2D<float4> _BlurOutputTexture;
+
+// ============================================================================
+// Tile Buffer（用于 Indirect Dispatch）
+// ============================================================================
+
+struct TileData
+{
+    uint2 tileCoord;
+};
+
+StructuredBuffer<TileData> _SSProfileTileBuffer; 
+
+// ============================================================================
+// 参数
+// ============================================================================
+
+float4 _BlurTexture_TexelSize;
+float _BlurIntensity;
+float _DepthScale;
+
+#define TILE_SIZE 8
+#define KERNEL_HALF_SIZE 6
+
+// ============================================================================
+// Bilateral Filtering
+// ============================================================================
+
+float ComputeDepthWeight(float centerDepth, float sampleDepth)
+{
+    float depthDiff = abs(centerDepth - sampleDepth);
+    
+    float linearCenter = Linear01Depth(centerDepth, _ZBufferParams);
+    float linearSample = Linear01Depth(sampleDepth, _ZBufferParams);
+    float linearDiff = abs(linearCenter - linearSample);
+    
+    const float DEPTH_TOLERANCE = 0.001; 
+    linearDiff = max(0.0, linearDiff - DEPTH_TOLERANCE);
+    
+    return exp(-linearDiff * _DepthScale);
+}
+
+// ============================================================================
+// 共享 Blur 逻辑（避免代码重复）
+// ============================================================================
+
+void PerformBlur(
+    uint2 pixelCoord,
+    uint width,
+    uint height,
+    int2 blurDirection,  // (1,0) for X, (0,1) for Y
+    TEXTURE2D_X(inputTexture),
+    out float4 result)
+{
+    result = float4(0, 0, 0, 0);
+
+    if (pixelCoord.x >= width || pixelCoord.y >= height)
+        return;
+
+    // 读取中心像素
+    float4 centerData = inputTexture[pixelCoord];
+    float3 centerDiffuse = centerData.rgb;
+    float centerDepth = centerData.a;
+
+    if (centerDepth == 0.0)
+        return;
+
+    // 提取 ProfileID
+    float4 specularData = _SSProfileSetupSpecular[pixelCoord];
+    uint profileID = ExtractProfileID(specularData.a);
+
+    SSProfileParams profile = LoadSSProfileParams(profileID);
+    float scatterRadiusInMm = profile.diffuseMeanFreePathMax;
+
+    // 从 LUT 读取 Kernel
+    float4 kernelWeights[KERNEL_HALF_SIZE + 1];
+    for (int i = 0; i <= KERNEL_HALF_SIZE; i++)
+    {
+        kernelWeights[i] = SampleProfileTexture(profileID, SSSS_KERNEL0_OFFSET + i);
+    }
+
+    // 初始化累加器
+    float3 accum = centerDiffuse * kernelWeights[0].rgb;
+    float weightSum = dot(kernelWeights[0].rgb, float3(0.333, 0.333, 0.333));
+
+    // 沿指定方向采样
+    for (int offset = 1; offset <= KERNEL_HALF_SIZE; offset++)
+    {
+        float sampleOffset = kernelWeights[offset].a;
+        float pixelOffset = DecodeKernelOffset(sampleOffset, scatterRadiusInMm);
+
+        int pixelOffsetInt = int(round(pixelOffset));
+
+        // 正方向
+        {
+            int2 sampleCoord = int2(pixelCoord) + int2(blurDirection * pixelOffsetInt);
+            sampleCoord = clamp(sampleCoord, int2(0, 0), int2(width - 1, height - 1));
+
+            float4 sampleData = inputTexture[sampleCoord];
+            float sampleDepth = sampleData.a;
+
+            if (sampleDepth > 0.0)
+            {
+                float depthWeight = ComputeDepthWeight(centerDepth, sampleDepth);
+                float3 burleyWeight = kernelWeights[offset].rgb;
+                float3 weight = burleyWeight * depthWeight;
+
+                accum += sampleData.rgb * weight;
+                weightSum += dot(weight, float3(0.333, 0.333, 0.333));
+            }
+        }
+
+        // 负方向
+        {
+            int2 sampleCoord = int2(pixelCoord) - int2(blurDirection * pixelOffsetInt);
+            sampleCoord = clamp(sampleCoord, int2(0, 0), int2(width - 1, height - 1));
+
+            float4 sampleData = inputTexture[sampleCoord];
+            float sampleDepth = sampleData.a;
+
+            if (sampleDepth > 0.0)
+            {
+                float depthWeight = ComputeDepthWeight(centerDepth, sampleDepth);
+                float3 burleyWeight = kernelWeights[offset].rgb;
+                float3 weight = burleyWeight * depthWeight;
+
+                accum += sampleData.rgb * weight;
+                weightSum += dot(weight, float3(0.333, 0.333, 0.333));
+            }
+        }
+    }
+
+    float3 blurredDiffuse = accum / max(weightSum, 0.001);
+    blurredDiffuse *= _BlurIntensity;
+
+    result = float4(blurredDiffuse, centerDepth);
+}
+
+// ============================================================================
+// 传统 Kernel（全屏处理）
+// ============================================================================
+
+[numthreads(TILE_SIZE, TILE_SIZE, 1)]
+void CSBlurHorizontal(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    uint width = (uint)_BlurTexture_TexelSize.x;
+    uint height = (uint)_BlurTexture_TexelSize.y;
+
+    float4 result;
+    PerformBlur(dispatchThreadId.xy, width, height, int2(1, 0), _SSProfileSetupDiffuse, result);
+    _BlurOutputTexture[dispatchThreadId.xy] = result;
+}
+
+[numthreads(TILE_SIZE, TILE_SIZE, 1)]
+void CSBlurVertical(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    uint width = (uint)_BlurTexture_TexelSize.x;
+    uint height = (uint)_BlurTexture_TexelSize.y;
+
+    float4 result;
+    PerformBlur(dispatchThreadId.xy, width, height, int2(0, 1), _BlurInputTexture, result);
+    _BlurOutputTexture[dispatchThreadId.xy] = result;
+}
+
+// ============================================================================
+// Indirect Kernel（只处理有 SSS 的 Tile）
+// ============================================================================
+
+[numthreads(TILE_SIZE, TILE_SIZE, 1)]
+void CSBlurHorizontalIndirect(
+    uint3 groupThreadId : SV_GroupThreadID,
+    uint3 groupId : SV_GroupID)
+{
+    uint tileIndex = groupId.x;
+    uint2 tileOrigin = _SSProfileTileBuffer[tileIndex].tileCoord;
+    uint2 pixelCoord = tileOrigin + groupThreadId.xy;
+
+    uint width = (uint)_BlurTexture_TexelSize.x;
+    uint height = (uint)_BlurTexture_TexelSize.y;
+
+    if (pixelCoord.x >= width || pixelCoord.y >= height)
+        return;
+
+    float4 result;
+    PerformBlur(pixelCoord, width, height, int2(1, 0), _SSProfileSetupDiffuse, result);
+
+    if (pixelCoord.x < width && pixelCoord.y < height)
+    {
+        _BlurOutputTexture[pixelCoord] = result;
+    }
+}
+
+[numthreads(TILE_SIZE, TILE_SIZE, 1)]
+void CSBlurVerticalIndirect(
+    uint3 groupThreadId : SV_GroupThreadID,
+    uint3 groupId : SV_GroupID)
+{
+    uint tileIndex = groupId.x;
+    uint2 tileOrigin = _SSProfileTileBuffer[tileIndex].tileCoord;
+    uint2 pixelCoord = tileOrigin + groupThreadId.xy;
+
+    uint width = (uint)_BlurTexture_TexelSize.x;
+    uint height = (uint)_BlurTexture_TexelSize.y;
+
+    if (pixelCoord.x >= width || pixelCoord.y >= height)
+        return;
+
+    float4 result;
+    PerformBlur(pixelCoord, width, height, int2(0, 1), _BlurInputTexture, result);
+
+    if (pixelCoord.x < width && pixelCoord.y < height)
+    {
+        _BlurOutputTexture[pixelCoord] = result;
+    }
+}

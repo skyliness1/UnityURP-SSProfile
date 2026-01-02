@@ -1,4 +1,7 @@
 using UnityEngine;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
 namespace SoulRender
 {
@@ -12,10 +15,6 @@ namespace SoulRender
 
         public int ProfileId => _profileId;
         
-        // -----------------------------------------------------------------------
-        // Burley (MFP) 参数
-        // UE5 范围参考:  SubsurfaceProfile.h
-        // -----------------------------------------------------------------------
         [Header("SSS Parameters (Burley Normalized)")]
         [Tooltip("材质的基础颜色。应尽可能与 Albedo 贴图保持一致。")]
         public Color surfaceAlbedo = new Color(0.91f, 0.34f, 0.27f);
@@ -37,9 +36,6 @@ namespace SoulRender
         [Tooltip("边界处的颜色溢出控制 (Per-channel falloff)。")]
         public Color boundaryColorBleed = Color.white;
         
-        // -----------------------------------------------------------------------
-        // Transmission (透射) 参数
-        // -----------------------------------------------------------------------
         [Header("Transmission")]
         [Tooltip("透射 (背光) 的染色。")]
         public Color transmissionTintColor = Color.white;
@@ -60,9 +56,6 @@ namespace SoulRender
         [Range(1.0f, 3.0f)] 
         public float IOR = 1.55f;
 
-        // -----------------------------------------------------------------------
-        // Dual Specular (双层高光) 参数
-        // -----------------------------------------------------------------------
         [Header("Dual Specular")]
         [Tooltip("第一层高光粗糙度。")]
         [Range(0.5f, 2.0f)] 
@@ -76,130 +69,130 @@ namespace SoulRender
         [Range(0.1f, 0.9f)] 
         public float lobeMix = 0.85f;
         
-        /// <summary>
-        /// 设置 ID (支持 Editor Undo)
-        /// </summary>
         public void SetProfileId(int id)
         {
             if (_profileId != id)
             {
 #if UNITY_EDITOR
-                UnityEditor. Undo.RecordObject(this, "Update Profile ID");
+                Undo.RecordObject(this, "Update Profile ID");
 #endif
                 _profileId = id;
 #if UNITY_EDITOR
-                UnityEditor.EditorUtility.SetDirty(this);
+                EditorUtility.SetDirty(this);
 #endif
             }
         }
 
 #if UNITY_EDITOR
-        // 定义静态事件，供 Editor 端的 Manager 监听
-        // 这样 Runtime 代码就不需要直接引用 Editor 代码，解决了编译错误
         public static event System.Action<SSProfileSettings> OnSettingsChanged;
+        
+        private bool _pendingNotification = false;
 
         private void OnValidate()
         {
-            if (! Application.isPlaying)
+            if (!Application.isPlaying && !_pendingNotification)
             {
-                UnityEditor.EditorApplication.delayCall += NotifyChange;
+                _pendingNotification = true;
+                EditorApplication.delayCall += NotifyChange;
             }
         }
 
         private void NotifyChange()
         {
-            if (this == null) return;
-            // 触发事件，而不是直接调用 Manager
+            _pendingNotification = false;
+
+            if (this == null)
+            {
+                return;
+            }
+            
             OnSettingsChanged?.Invoke(this);
         }
 #endif
     }
     
-    // ===================================================================================
-    // Editor 部分 (包含属性绘制器和中文界面)
-    // ===================================================================================
 #if UNITY_EDITOR
     public class ReadOnlyInspectorAttribute : PropertyAttribute { }
 
-    [UnityEditor.CustomPropertyDrawer(typeof(ReadOnlyInspectorAttribute))]
-    public class ReadOnlyInspectorDrawer : UnityEditor. PropertyDrawer
+    [CustomPropertyDrawer(typeof(ReadOnlyInspectorAttribute))]
+    public class ReadOnlyInspectorDrawer : PropertyDrawer
     {
-        public override void OnGUI(Rect position, UnityEditor.SerializedProperty property, GUIContent label)
+        public override void OnGUI(Rect position, SerializedProperty property, GUIContent label)
         {
-            UnityEditor.EditorGUI. BeginDisabledGroup(true);
-            UnityEditor.EditorGUI. PropertyField(position, property, label, true);
-            UnityEditor. EditorGUI.EndDisabledGroup();
+            EditorGUI.BeginDisabledGroup(true);
+            EditorGUI.PropertyField(position, property, label, true);
+            EditorGUI.EndDisabledGroup();
         }
     }
 
-    [UnityEditor.CustomEditor(typeof(SSProfileSettings))]
-    public class SSProfileSettingsEditor : UnityEditor.Editor
+    [CustomEditor(typeof(SSProfileSettings))]
+    public class SSProfileSettingsEditor : Editor
     {
-        UnityEditor.SerializedProperty _profileId;
-        UnityEditor.SerializedProperty _surfaceAlbedo;
-        UnityEditor.SerializedProperty _meanFreePathColor;
-        UnityEditor.SerializedProperty _meanFreePathDistance;
-        UnityEditor.SerializedProperty _worldUnitScale;
-        UnityEditor.SerializedProperty _tint;
-        UnityEditor.SerializedProperty _boundaryColorBleed;
+        SerializedProperty _profileId;
+        SerializedProperty _surfaceAlbedo;
+        SerializedProperty _meanFreePathColor;
+        SerializedProperty _meanFreePathDistance;
+        SerializedProperty _worldUnitScale;
+        SerializedProperty _tint;
+        SerializedProperty _boundaryColorBleed;
         
-        UnityEditor.SerializedProperty _transmissionTintColor;
-        UnityEditor.SerializedProperty _extinctionScale;
-        UnityEditor.SerializedProperty _normalScale;
-        UnityEditor.SerializedProperty _scatteringDistribution;
-        UnityEditor.SerializedProperty _ior;
+        SerializedProperty _transmissionTintColor;
+        SerializedProperty _extinctionScale;
+        SerializedProperty _normalScale;
+        SerializedProperty _scatteringDistribution;
+        SerializedProperty _ior;
         
-        UnityEditor.SerializedProperty _roughness0;
-        UnityEditor.SerializedProperty _roughness1;
-        UnityEditor. SerializedProperty _lobeMix;
+        SerializedProperty _roughness0;
+        SerializedProperty _roughness1;
+        SerializedProperty _lobeMix;
 
         private void OnEnable()
         {
             _profileId = serializedObject.FindProperty("_profileId");
-            _surfaceAlbedo = serializedObject. FindProperty(nameof(SSProfileSettings.surfaceAlbedo));
-            _meanFreePathColor = serializedObject.FindProperty(nameof(SSProfileSettings. meanFreePathColor));
+            _surfaceAlbedo = serializedObject.FindProperty(nameof(SSProfileSettings.surfaceAlbedo));
+            _meanFreePathColor = serializedObject.FindProperty(nameof(SSProfileSettings.meanFreePathColor));
             _meanFreePathDistance = serializedObject.FindProperty(nameof(SSProfileSettings.meanFreePathDistance));
             _worldUnitScale = serializedObject.FindProperty(nameof(SSProfileSettings.worldUnitScale));
-            _tint = serializedObject. FindProperty(nameof(SSProfileSettings.tint));
+            _tint = serializedObject.FindProperty(nameof(SSProfileSettings.tint));
             _boundaryColorBleed = serializedObject.FindProperty(nameof(SSProfileSettings.boundaryColorBleed));
             
             _transmissionTintColor = serializedObject.FindProperty(nameof(SSProfileSettings.transmissionTintColor));
             _extinctionScale = serializedObject.FindProperty(nameof(SSProfileSettings.extinctionScale));
-            _normalScale = serializedObject.FindProperty(nameof(SSProfileSettings. normalScale));
-            _scatteringDistribution = serializedObject. FindProperty(nameof(SSProfileSettings.scatteringDistribution));
+            _normalScale = serializedObject.FindProperty(nameof(SSProfileSettings.normalScale));
+            _scatteringDistribution = serializedObject.FindProperty(nameof(SSProfileSettings.scatteringDistribution));
             _ior = serializedObject.FindProperty(nameof(SSProfileSettings.IOR));
             
             _roughness0 = serializedObject.FindProperty(nameof(SSProfileSettings.roughness0));
             _roughness1 = serializedObject.FindProperty(nameof(SSProfileSettings.roughness1));
-            _lobeMix = serializedObject. FindProperty(nameof(SSProfileSettings.lobeMix));
+            _lobeMix = serializedObject.FindProperty(nameof(SSProfileSettings.lobeMix));
         }
 
         public override void OnInspectorGUI()
         {
             serializedObject.Update();
 
-            UnityEditor.EditorGUILayout.LabelField("核心设置 (System)", UnityEditor.EditorStyles. boldLabel);
-            UnityEditor.EditorGUILayout.PropertyField(_profileId, new GUIContent("Profile ID (行号)"));
-            UnityEditor.EditorGUILayout.Space(5);
+            EditorGUILayout.LabelField("核心设置 (System)", EditorStyles.boldLabel);
+            EditorGUILayout.PropertyField(_profileId, new GUIContent("Profile ID (行号)"));
+            EditorGUILayout.Space(5);
 
-            UnityEditor.EditorGUILayout.LabelField("SSS 参数 (Burley Normalized - MFP)", UnityEditor.EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("SSS 参数", EditorStyles.boldLabel);
             DrawProp(_surfaceAlbedo, "表面反照率 (Surface Albedo)");
             DrawProp(_meanFreePathColor, "平均自由程颜色 (MFP Color)");
             DrawProp(_meanFreePathDistance, "平均自由程距离 (MFP Distance, cm)");
             DrawProp(_worldUnitScale, "世界单位缩放 (World Unit Scale)");
             DrawProp(_tint, "散射染色 (Tint)");
             DrawProp(_boundaryColorBleed, "边界溢色 (Boundary Bleed)");
-            UnityEditor.EditorGUILayout.Space(5);
+            EditorGUILayout.Space(5);
 
-            UnityEditor.EditorGUILayout.LabelField("透射参数 (Transmission)", UnityEditor.EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("透射参数 (Transmission)", EditorStyles.boldLabel);
             DrawProp(_transmissionTintColor, "透射颜色 (Tint)");
             DrawProp(_extinctionScale, "消光系数 (Extinction)");
             DrawProp(_normalScale, "法线扭曲 (Normal Scale)");
             DrawProp(_scatteringDistribution, "透射分布 (Distribution)");
             DrawProp(_ior, "折射率 (IOR)");
-            UnityEditor.EditorGUILayout.Space(5);
+            EditorGUILayout.Space(5);
 
-            UnityEditor.EditorGUILayout.LabelField("双叶高光 (Dual Specular)", UnityEditor.EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("双叶高光 (Dual Specular)", EditorStyles.boldLabel);
             DrawProp(_roughness0, "粗糙度 A (Roughness 0)");
             DrawProp(_roughness1, "粗糙度 B (Roughness 1)");
             DrawProp(_lobeMix, "混合权重 (Lobe Mix)");
@@ -207,10 +200,12 @@ namespace SoulRender
             serializedObject.ApplyModifiedProperties();
         }
 
-        private void DrawProp(UnityEditor.SerializedProperty prop, string label)
+        private void DrawProp(SerializedProperty prop, string label)
         {
             if (prop != null)
-                UnityEditor.EditorGUILayout.PropertyField(prop, new GUIContent(label));
+            {
+                EditorGUILayout.PropertyField(prop, new GUIContent(label));
+            }
         }
     }
 #endif
