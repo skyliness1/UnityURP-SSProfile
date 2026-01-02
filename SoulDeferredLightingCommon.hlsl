@@ -13,9 +13,6 @@
 //Scene Params Set By Global
 half _SsrRelectionIntensity;
 
-// SSProfile 支持
-#include "Packages/com.unity.render-pipelines.universal/ArtShaders/Scene/SSProfile/Shaders/Include/SSProfileCommon.hlsl"
-
 //PC FO 矫正
 float _NoMetalF0;
 
@@ -28,21 +25,10 @@ float Cha_ShadowIntensity;
 
 //点光标签
 float _SceneSpotLightId;
-
-// ============================================================================
-// Light Accumulator 结构
-// ============================================================================
 struct LightAccumulator
 {
     float3 totalLight;
 };
-
-LightAccumulator GetDefaultLightAccumulator()
-{
-    LightAccumulator acc;
-    acc.totalLight = float3(0, 0, 0);
-    return acc;
-}
 
 BRDFData GBufferToBRDF(GBufferData GBuffer)
 {
@@ -53,17 +39,6 @@ BRDFData GBufferToBRDF(GBufferData GBuffer)
     //PC FO 矫正
     brdfData.specular = lerp(_NoMetalF0, GBuffer.baseColor, GBuffer.metallic);
     
-    return brdfData;
-}
-
-// SSS 专用 BRDF (metallic 通道被复用为 opacity)
-BRDFData GBufferToBRDF_SSS(GBufferData GBuffer)
-{
-    BRDFData brdfData = (BRDFData)0;
-    half alpha = half(1.0);
-    // SSS 材质 metallic = 0 (非金属)
-    InitializeBRDFData(GBuffer.baseColor, 0, 0, GBuffer.smoothness, alpha, brdfData, 1);
-    brdfData.specular = _NoMetalF0;
     return brdfData;
 }
 
@@ -78,101 +53,6 @@ BRDFData GBufferToBRDF_Weapon(GBufferData GBuffer,float nol)
     InitializeBRDFDataDirect(brdfDiffuse, brdfSpecular, reflectivity, oneMinusReflectivity, GBuffer.smoothness, alpha, brdfData);
     return brdfData;
 }
-
-// ============================================================================
-// SSS Profile 光照计算 (分离 Diffuse 和 Specular，包含透射)
-// ============================================================================
-void AccumulateLightingSSS(
-    BRDFData brdfData,
-    GBufferData GBuffer,
-    Light light,
-    float3 viewDirectionWS,
-    uint profileId,
-    float opacity,
-    float thickness,          // 透射厚度
-    bool enableTransmission,  // 是否启用透射
-    inout float3 diffuseAccum,
-    inout float3 specularAccum)
-{
-    half NdotL = saturate(dot(GBuffer.normalWS, light.direction));
-    half lightAtten = light.distanceAttenuation * light.shadowAttenuation;
-    half3 radiance = light.color * lightAtten;
-    
-    // ==================== Diffuse ====================
-    // 基础 Diffuse
-    float3 diffuse = brdfData.diffuse * radiance * NdotL;
-    
-    // ==================== Transmission ====================
-    if (enableTransmission && thickness > 0.001)
-    {
-        float3 transmission = CalculateTransmissionSimple(
-            profileId,
-            GBuffer.normalWS,
-            light.direction,
-            viewDirectionWS,
-            light.color,
-            light.distanceAttenuation * light.shadowAttenuation,
-            thickness
-        );
-        
-        // 透射加到 Diffuse
-        diffuse += transmission * brdfData.diffuse;
-    }
-    
-    diffuseAccum += diffuse;
-    
-    // ==================== Specular (Dual Lobe) ====================
-    float roughness0, roughness1, lobeMix;
-    GetSubsurfaceProfileDualSpecular(profileId, roughness0, roughness1, lobeMix);
-    
-    float3 spec = CalculateDualSpecular(
-        brdfData, 
-        GBuffer.normalWS, 
-        light.direction,
-        viewDirectionWS, 
-        roughness0, 
-        roughness1, 
-        lobeMix,
-        opacity
-    );
-    
-    specularAccum += spec * brdfData.specular * radiance * NdotL;
-}
-
-// ============================================================================
-// 附加光源 SSS 计算
-// ============================================================================
-#ifdef SOUL_CLUSTERED_LIGHTING
-void AccumulateAdditionalLightingSSS(
-    PositionInputs posInput,
-    BRDFData brdfData,
-    GBufferData GBuffer,
-    float3 viewDirectionWS,
-    uint profileId,
-    float opacity,
-    float thickness,
-    bool enableTransmission,
-    inout float3 diffuseAccum,
-    inout float3 specularAccum)
-{
-    uint lightCount = GetAdditionalLightsCount();
-    
-    for (uint i = 0; i < lightCount; i++)
-    {
-        Light light = GetAdditionalLight(i, posInput.positionWS, GBuffer.shadowMask);
-        
-        if (! IsMatchingLightLayer(light.layerMask, GBuffer.lightLayer))
-            continue;
-        
-        AccumulateLightingSSS(
-            brdfData, GBuffer, light, viewDirectionWS, 
-            profileId, opacity, thickness, enableTransmission,
-            diffuseAccum, specularAccum
-        );
-    }
-}
-#endif
-
 
 //**********************************  Scene Lighting *********************************************************//
 float3 AccumulateLightingScene(BRDFData brdfData, GBufferData GBuffer, Light mainLight, float3 viewDirectionWS)
@@ -266,6 +146,46 @@ float3 AccumulateLightingWeapon(GBufferData GBuffer,Light mainLight,float3 viewD
     return brdf * radiance;
 }
 
+//**********************************  SSProfile Lighting *********************************************************//
+#include "Packages/com.unity.render-pipelines.universal@14.0.11/ArtShaders/Scene/SSProfile/Shaders/Include/SSProfileLighting.hlsl"
+//**********************************  SSProfile Lighting *********************************************************//
+float3 AccumulateLightingSSProifle(GBufferData GBuffer, Light mainLight, float3 viewDirectionWS, float directAO)
+{
+    uint profileID = ExtractProfileID(GBuffer.customDataSingle);
+    SSProfileParams profile = LoadSSProfileParams(profileID);
+    SSProfileLightingContext context = CreateLightingContext(GBuffer.normalWS, viewDirectionWS, mainLight.direction);
+    float lightAtten = mainLight.shadowAttenuation * mainLight.distanceAttenuation;
+    SSProfileLightingResult lightResult = SSProfileDirectLighting(profile, context, GBuffer.baseColor,
+        GBuffer.metallic, mainLight.color, lightAtten, 0.5, true);
+    float3 surfaceLighting = (lightResult.diffuse + lightResult.specular) * context.NoL * mainLight.color * lightAtten;
+    surfaceLighting *= min(GBuffer.ao, directAO); 
+    float3 totalLight = surfaceLighting + lightResult.transmission;
+    return totalLight;
+}
+
+float3 AccumulateAdditionalLightingSSProfile(
+    PositionInputs posInput, 
+    GBufferData GBuffer, 
+    float3 viewDirectionWS, 
+    uint lightLayer,
+    float directAO)
+{
+    float3 totalLight = 0;
+    
+    uint pixelLightCount = GetAdditionalLightsCount();
+    for (uint lightIndex = 0u; lightIndex < pixelLightCount; ++lightIndex)
+    {
+        Light light = GetAdditionalLight(lightIndex, posInput.positionWS);
+        
+        if (IsMatchingLightLayer(light.layerMask, lightLayer))
+        {
+            totalLight += AccumulateLightingSSProifle(GBuffer, light, viewDirectionWS, directAO);
+        }
+    }
+    
+    return totalLight;
+}
+
 TEXTURE2D_X(_SsrReflectionTexture);
 float _ColorPyramidMipCount;
 float _SampleLODInDeferredPass;
@@ -341,78 +261,6 @@ LightAccumulator AccumulateLighting(GBufferData GBuffer, PositionInputs posInput
         subsurfaceColor = float3(GBuffer.ao, GBuffer.metallic, GBuffer.customDataSingle);
         GBuffer.metallic = 0;
     }
-
-     // ==================== SSS Profile 材质 ====================
-    UNITY_BRANCH
-    if (GBuffer.shadingModelID == SHADINGMODELID_SUBSURFACE_PROFILE)
-    {
-        // 提取 SSS 数据
-        uint profileId = (uint)(GBuffer.customDataSingle * 255.0 + 0.5);
-        float opacity = GBuffer.metallic;
-        
-        // 透射厚度 (可以从 GBuffer 的某个通道读取，或使用固定值)
-        // 这里使用 shadowMask 通道作为厚度的近似 (需要在材质中设置)
-        // 或者使用固定值进行测试
-        float thickness = 0.5; // 默认厚度 0.5cm，可以根据需要调整
-        bool enableTransmission = false;
-        
-        // 使用 SSS 专用 BRDF
-        BRDFData brdfData = GBufferToBRDF_SSS(GBuffer);
-        
-        // 获取主光源
-        float4 shadowCoord = TransformWorldToShadowCoord(posInput.positionWS);
-        Light mainLight = GetMainLight(shadowCoord, posInput.positionWS, GBuffer.shadowMask);
-        
-        #if defined(CONTACT_SHADOWS)
-        mainLight. shadowAttenuation = min(
-            GetLightContactShadow(posInput.positionSS, GBuffer.normalWS, mainLight. direction, 1), 
-            mainLight.shadowAttenuation
-        );
-        #endif
-        
-        half isMainLightCulling = IsMatchingLightLayer(mainLight.layerMask, GBuffer.lightLayer) ?  1.0 : 0.0;
-        mainLight.distanceAttenuation = isMainLightCulling;
-        
-        // 计算 Diffuse 和 Specular
-        float3 diffuse = float3(0, 0, 0);
-        float3 specular = float3(0, 0, 0);
-        
-        // 主光源
-        AccumulateLightingSSS(
-            brdfData, GBuffer, mainLight, viewDirectionWS, 
-            profileId, opacity, thickness, enableTransmission,
-            diffuse, specular
-        );
-        
-        // 附加光源
-        #ifdef SOUL_CLUSTERED_LIGHTING
-        AccumulateAdditionalLightingSSS(
-            posInput, brdfData, GBuffer, viewDirectionWS, 
-            profileId, opacity, thickness, enableTransmission,
-            diffuse, specular
-        );
-        #endif
-        
-        // SSAO
-        float2 normalizedScreenSpaceUV = GetNormalizedScreenSpaceUV(posInput.positionSS);
-        AmbientOcclusionFactor aoFactor = GetScreenSpaceAmbientOcclusion(normalizedScreenSpaceUV);
-        
-        // GI 加到 Diffuse
-        float3 gi = GBuffer.staticLighting * min(aoFactor.indirectAmbientOcclusion, GBuffer.ao);
-        diffuse += gi;
-        
-        // 应用 Opacity 到 Diffuse
-        diffuse *= opacity;
-        
-        // SSR 加到 Specular
-        //specular += EvaluateScreenSpaceReflection(posInput, brdfData, GBuffer, viewDirectionWS);
-        
-        // 棋盘格编码输出
-        bool isEvenPixel = IsCheckerboardEven(int2(posInput.positionSS));
-        lightAccumulator.totalLight = isEvenPixel ? diffuse : specular;
-        
-        return lightAccumulator;
-    }
     
     BRDFData brdfData = GBufferToBRDF(GBuffer);
     float4 shadowCoord = TransformWorldToShadowCoord(posInput.positionWS);
@@ -437,7 +285,7 @@ LightAccumulator AccumulateLighting(GBufferData GBuffer, PositionInputs posInput
     //trick2
     //因为这个野外的烘焙的shadowmask是截断自定义, 但是室内还是非黑即白的, 所以这里也要跟着那波逻辑做一个判断
     half isOutdoor = 0;
-    if(GBuffer.shadingModelID == SHADINGMODELID_DEFAULT_LIT_SCENE)
+    if(GBuffer.shadingModelID == SHADINGMODELID_DEFAULT_LIT_SCENE || GBuffer.shadingModelID == SHADINGMODELID_SUBSURFACE_PROFILE)
     {
         float trick = step(0.05 , GBuffer.shadowMask.x);
         isOutdoor = trick;
@@ -445,8 +293,7 @@ LightAccumulator AccumulateLighting(GBufferData GBuffer, PositionInputs posInput
         half outdoorRealtimeShadow = max(mainLight.shadowAttenuation, shadowThreshold);
         mainLight.shadowAttenuation = lerp( mainLight.shadowAttenuation, outdoorRealtimeShadow, isOutdoor);
     }
-
-
+    
     UNITY_BRANCH
     if (GBuffer.shadingModelID == SHADINGMODELID_DEFAULT_LIT_SCENE)
     {
@@ -462,6 +309,21 @@ LightAccumulator AccumulateLighting(GBufferData GBuffer, PositionInputs posInput
         //lightAccumulator.totalLight *= 0.f;
         //SSR
         lightAccumulator.totalLight += EvaluateScreenSpaceReflection(posInput, brdfData, GBuffer, viewDirectionWS);
+    }
+
+    UNITY_BRANCH
+    if(GBuffer.shadingModelID == SHADINGMODELID_SUBSURFACE_PROFILE)
+    {
+        float2 normalizedScreenSpaceUV = GetNormalizedScreenSpaceUV(posInput.positionSS);
+        AmbientOcclusionFactor aoFactor = GetScreenSpaceAmbientOcclusion(normalizedScreenSpaceUV);
+        lightAccumulator.totalLight += GBuffer.staticLighting * min(aoFactor.indirectAmbientOcclusion, GBuffer.ao);
+        lightAccumulator.totalLight += AccumulateLightingSSProifle(GBuffer, mainLight, viewDirectionWS, aoFactor.directAmbientOcclusion);
+        #ifdef SOUL_CLUSTERED_LIGHTING
+        lightAccumulator.totalLight += AccumulateAdditionalLightingSSProfile(posInput, GBuffer, viewDirectionWS, GBuffer.lightLayer, aoFactor.directAmbientOcclusion);
+        #endif
+        
+        //SSR
+        //lightAccumulator.totalLight += EvaluateScreenSpaceReflection(posInput, brdfData, GBuffer, viewDirectionWS);
     }
     
     UNITY_BRANCH
